@@ -8,7 +8,6 @@ import ast
 import collections
 import logging
 import os
-import shutil
 from tempfile import mkdtemp
 from uuid import UUID, uuid4
 
@@ -18,12 +17,18 @@ from django.utils import six
 
 import storageService as storage_service
 from archivematicaFunctions import unicodeToStr
+from fileOperations import get_extract_dir_name
 from main import models
 
 from server.db import auto_close_old_connections
 from server.jobs import JobChain
 from server.processing_config import copy_processing_config
 from server.utils import uuid_from_path
+
+try:
+    from pathlib import Path
+except ImportError:
+    from pathlib2 import Path
 
 
 logger = logging.getLogger("archivematica.mcp.server.packages")
@@ -119,24 +124,39 @@ def _file_is_an_archive(filepath):
 
 
 def _pad_destination_filepath_if_it_already_exists(filepath, original=None, attempt=0):
+    """
+    Return a version of the filepath that does not yet exist, padding with numbers
+    as necessary and reattempting until a non-existent filepath is found
+
+    :param filepath: `Path` or string of the desired destination filepath
+    :param original: `Path` or string of the original filepath (before padding attempts)
+    :param attempt: Number
+
+    :returns: `Path` object, padded as necessary
+    """
     if original is None:
         original = filepath
+    filepath = Path(filepath)
+    original = Path(original)
+
     attempt = attempt + 1
-    if not os.path.exists(filepath):
+    if not filepath.exists():
         return filepath
-    if os.path.isdir(filepath):
+    if filepath.is_dir():
         return _pad_destination_filepath_if_it_already_exists(
-            original + "_" + str(attempt), original, attempt
+            "{}_{}".format(original, attempt), original, attempt
         )
+
     # need to work out basename
-    basedirectory = os.path.dirname(original)
-    basename = os.path.basename(original)
+    basedirectory = original.parent
+    basename = original.name
+
     # do more complex padding to preserve file extension
     period_position = basename.index(".")
     non_extension = basename[0:period_position]
     extension = basename[period_position:]
     new_basename = "{}_{}{}".format(non_extension, attempt, extension)
-    new_filepath = os.path.join(basedirectory, new_basename)
+    new_filepath = basedirectory / new_basename
     return _pad_destination_filepath_if_it_already_exists(
         new_filepath, original, attempt
     )
@@ -181,7 +201,7 @@ def _copy_from_transfer_sources(paths, relative_destination):
     files = {l["uuid"]: {"location": l, "files": []} for l in transfer_sources}
 
     for item in paths:
-        location, path = Path(item).parts()
+        location, path = LocationPath(item).parts()
         if location is None:
             location = _default_transfer_source_location_uuid()
         if location not in files:
@@ -240,21 +260,45 @@ def _move_to_internal_shared_dir(filepath, dest, transfer):
     error = _check_filepath_exists(filepath)
     if error:
         raise Exception(error)
+
+    filepath = Path(filepath)
+    dest = Path(dest)
+
+    is_dir = filepath.is_dir()
+
     # Confine destination to subdir of originals.
-    basename = os.path.basename(filepath)
-    dest = _pad_destination_filepath_if_it_already_exists(os.path.join(dest, basename))
-    # Ensure directories end with a trailing slash.
-    if os.path.isdir(filepath):
-        dest = os.path.join(dest, "")
+    basename = filepath.name
+    dest = _pad_destination_filepath_if_it_already_exists(dest / basename)
+
     try:
-        shutil.move(filepath, dest)
-    except (OSError, shutil.Error) as e:
+        filepath.rename(dest)
+    except OSError as e:
         raise Exception("Error moving from %s to %s (%s)", filepath, dest, e)
     else:
-        transfer.currentlocation = dest.replace(
+        transfer.currentlocation = str(dest).replace(
             settings.SHARED_DIRECTORY, "%sharedPath%", 1
         )
         transfer.save()
+
+    if not is_dir:
+        # Transfer is not a directory so it is an uploaded zipfile.
+        # Precreate the extraction directory for the uploaded zipfile
+        extract_dir = Path(get_extract_dir_name(dest))
+        try:
+            extract_dir.mkdir()
+        except OSError as e:
+            raise Exception("Error creating extraction dir %s (%s)", extract_dir, e)
+
+        # Move the processing config into the extraction directory so that it
+        # is preserved and used in the workflow
+        files_to_preserve = {"processingMCP.xml"}
+        for filename in files_to_preserve:
+            path = filepath.parent / filename
+            if path.exists():
+                try:
+                    path.rename(extract_dir / filename)
+                except OSError as e:
+                    raise Exception("Error moving %s to %s (%s)", path, extract_dir, e)
 
 
 @auto_close_old_connections()
@@ -349,7 +393,7 @@ def _capture_transfer_failure(fn):
 def _determine_transfer_paths(name, path, tmpdir):
     if _file_is_an_archive(path):
         transfer_dir = tmpdir
-        p = Path(path).path
+        p = LocationPath(path).path
         filepath = os.path.join(tmpdir, os.path.basename(p))
     else:
         path = os.path.join(path, ".")  # Copy contents of dir but not dir
@@ -454,7 +498,7 @@ def _start_package_transfer(
     _move_to_internal_shared_dir(filepath, starting_point.watched_dir, transfer)
 
 
-class Path(object):
+class LocationPath(object):
     """Path wraps a path that is a pair of two values: UUID and path."""
 
     uuid, path = None, None

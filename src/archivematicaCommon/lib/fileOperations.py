@@ -26,6 +26,11 @@ import uuid
 import sys
 import shutil
 
+try:
+    from pathlib import Path
+except ImportError:
+    from pathlib2 import Path
+
 from databaseFunctions import insertIntoFiles
 from executeOrRunSubProcess import executeOrRun
 from databaseFunctions import insertIntoEvents
@@ -401,3 +406,26 @@ def findFileInNormalizationCSV(
                 file=sys.stderr,
             )
             raise FindFileInNormalizatonCSVError(2)
+
+
+def get_extract_dir_name(filename):
+    """
+    Given the name of a compressed file, return the stem directory name into
+    which it should be extracted.
+
+    :param filename: `Path` object or string representation of filename
+
+    e.g. transfer1.zip will be extracted into transfer1
+         transfer2.tar.gz will be extracted into transfer2
+    """
+    filename = Path(filename)
+    if not filename.suffix:
+        raise ValueError("Filename '%s' must have an extension", filename)
+
+    extract_dir = filename.parent / filename.stem
+
+    # trim off '.tar' if present
+    if extract_dir.suffix in (".tar", ".TAR"):
+        extract_dir = extract_dir.stem
+
+    return str(extract_dir)
