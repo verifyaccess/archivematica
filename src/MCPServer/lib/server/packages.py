@@ -275,7 +275,8 @@ def _move_to_internal_shared_dir(filepath, dest, transfer):
     except OSError as e:
         raise Exception("Error moving from %s to %s (%s)", filepath, dest, e)
     else:
-        transfer.currentlocation = str(dest).replace(
+        dest = os.path.join(str(dest), "")
+        transfer.currentlocation = dest.replace(
             settings.SHARED_DIRECTORY, "%sharedPath%", 1
         )
         transfer.save()
